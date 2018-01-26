@@ -1,5 +1,5 @@
 all: canonical_histogram
 	./canonical_histogram
 
-canonical_histogram: canonical_histogram.cpp
-	$(CXX) -O3 -Wall -std=c++17 -o canonical_histogram canonical_histogram.cpp
+canonical_histogram: canonical_histogram.cpp histogram.h
+	$(CXX) -O3 -Wall -std=c++17 -pthread -o canonical_histogram canonical_histogram.cpp

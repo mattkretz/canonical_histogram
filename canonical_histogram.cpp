@@ -26,92 +26,92 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
-#include <numeric>
 #include <random>
+#include <thread>
 #include <string>
+#include <sstream>
+
+#include "histogram.h"
 
 // configuration
-constexpr int hist_size = 30;
-constexpr int bar_length = 100;
-constexpr int lo_res = 1 << 4;  // bin resolution at the low end
-constexpr int round_mode = FE_DOWNWARD;  // DOWNWARD: no problem, NEAREST: half a problem,
-                                         // UPWARD: full problem ;-)
-using RNE = std::default_random_engine;  // std::mt19937;
+constexpr int hist_size = 40;
+constexpr int lo_res = 1 << 8;  // bin resolution at the low end
+constexpr int round_mode =
+    FE_TONEAREST;  // DOWNWARD: no problem, TONEAREST: half a problem,
+                   // UPWARD: full problem ;-)
+using RNE = std::mt19937;  // std::mt19937;
 
-void print_histogram(const std::array<int, hist_size> &hist,
-                     const std::array<float, hist_size> &names)
+constexpr unsigned long long popcnt(unsigned long long n)
 {
-  const int max = std::accumulate(hist.begin(), hist.end(), 1, std::max<int>);
-  auto name_it = names.begin();
-  for (int n : hist) {
-    int bar_len = n * bar_length / max;
-    std::cout << std::setw(16) << std::hexfloat << *name_it++ << ": ["
-              << std::setw(bar_length) << std::left << std::string(bar_len, '#') << "] ("
-              << n << ")\n";
-  }
+    n = (n & 0x5555555555555555ULL) + ((n >> 1) & 0x5555555555555555ULL);
+    n = (n & 0x3333333333333333ULL) + ((n >> 2) & 0x3333333333333333ULL);
+    n = (n & 0x0f0f0f0f0f0f0f0fULL) + ((n >> 4) & 0x0f0f0f0f0f0f0f0fULL);
+    n = (n & 0x00ff00ff00ff00ffULL) + ((n >> 8) & 0x00ff00ff00ff00ffULL);
+    n = (n & 0x0000ffff0000ffffULL) + ((n >>16) & 0x0000ffff0000ffffULL);
+    n = (n & 0x00000000ffffffffULL) + ((n >>32) & 0x00000000ffffffffULL);
+    return n;
 }
 
-int hi_bin_for(float r)
+template <class T, std::size_t Bits, class G> float my_canonical(G &engine)
 {
-  if (r < .5f) {
-    return -1;
+  // work with 32 bits for simplicity
+  static_assert(G::min() == 0 && G::max() == 0xffffffffu, "");
+  static_assert(std::is_same<T, float>::value, "");
+  //constexpr std::size_t engine_bits = popcnt(G::max());
+  unsigned bits = engine();
+  if (bits == 0) {
+    return 0.f;
   }
-  int rr;
-  std::memcpy(&rr, &r, sizeof(rr));
-  rr &= 0x00ffffff;
-  return rr - (0x00800000 - hist_size + 1);
-}
-
-int lo_bin_for(float r)
-{
-  int n = std::floor(r / (std::numeric_limits<float>::epsilon() / 2 / lo_res));
-  if (n >= hist_size) {
-    return -1;
+  const unsigned exponent_adj = __builtin_clz(bits);
+  const unsigned exponent = 0x3f000000 - exponent_adj * 0x00800000;
+  if (exponent_adj > 32 - std::numeric_limits<T>::digits + 1) {
+      // need new randomness for the mantissa
+      bits = engine();
   }
-  return n;
+  constexpr unsigned mantissa_mask = (1u << (std::numeric_limits<T>::digits - 1)) - 1;
+  const unsigned mantissa = bits & mantissa_mask;
+  const unsigned value = exponent | mantissa;
+  T result;
+  std::memcpy(&result, &value, sizeof(T));
+    asm volatile("");
+  return result;
 }
 
 int main()
 {
   std::fesetround(round_mode);
-  std::array<float, hist_size> lo_names, hi_names;
-  lo_names[0] = 0.f;
-  for (int i = 1; i < hist_size; ++i) {
-    lo_names[i] = lo_names[i - 1] + (std::numeric_limits<float>::epsilon() / 2 / lo_res);
-  }
-  hi_names[hist_size - 1] = 1.f;
-  for (int i = hist_size - 2; i >= 0; --i) {
-    hi_names[i] = std::nextafter(hi_names[i + 1], 0.f);
-  }
+
+  histogram<hist_size> hists[] = {
+      {0x1.000018p-8f}, {0x1.000018p-7f}, {0x1.000018p-6f}, {0x1.000018p-5f},
+      {0x1.000018p-4f}, {0x1.000018p-3f}, {0x1.000018p-2f}, {1.f}};
 
   std::random_device rd;
-  RNE e(rd());
-  std::array<int, hist_size> lo_histogram = {}, hi_histogram = {};
 
-  auto &&refresh_screen = [&]() {
-    static int n = 0;
-    if (++n == 10) {
-      n = 1;
-      std::cout << "\x1b[2J\x1b[H";
-      print_histogram(lo_histogram, lo_names);
-      std::cout << '\n';
-      print_histogram(hi_histogram, hi_names);
-      std::cout << std::flush;
-    }
-  };
-  for (;;) {
-    const float r = std::generate_canonical<float, std::numeric_limits<float>::digits>(e);
-    const int lo = lo_bin_for(r);
-    if (lo >= 0) {
-      ++lo_histogram[lo];
-      refresh_screen();
-    } else {
-      const int hi = hi_bin_for(r);
-      if (hi >= 0) {
-        ++hi_histogram[hi];
-        refresh_screen();
+  for (int i = 0; i < 8; ++i) {
+    new std::thread([&]() {
+      RNE e(rd());
+      for (;;) {
+        const float r = std::generate_canonical<float, std::numeric_limits<float>::digits>(e);
+        //const float r = my_canonical<float, std::numeric_limits<float>::digits>(e);
+        for (auto &h : hists) {
+          h.insert(r);
+        }
       }
-    }
+    });
   }
+
+  for (;;) {
+    using namespace std::literals::chrono_literals;
+    std::this_thread::sleep_for(50ms);
+    std::cout.write("\x1b[2J\x1b[H", 7);
+    int i = 0;
+    for (const auto &h: hists) {
+      std::cout << h.printable();
+      ++i;
+      std::cout << "\x1b[" << (i / 4 * (hist_size + 1)) + 1 << ";" << (i % 4) * 60 << 'H';
+    }
+    std::cout << std::flush;
+  }
+
   return 0;
 }
